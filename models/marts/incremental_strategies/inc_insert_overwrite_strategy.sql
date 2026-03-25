@@ -2,8 +2,8 @@
     config(
         materialized='incremental',
         incremental_strategy='insert_overwrite',
-        partition_by=['order_date']
-    )
+        partition_by=['order_date'],
+        use_replace_where=True    )
 }}
 
 /*

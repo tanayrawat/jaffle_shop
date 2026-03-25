@@ -92,7 +92,6 @@ jobs:
         with:
           python-version: '3.11'
           # Cache pip installs between runs to speed up the workflow.
-          cache: 'pip'
 
       # ------------------------------------------------------------------
       # 3. INSTALL dbt-databricks

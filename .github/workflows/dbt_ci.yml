@@ -149,7 +149,7 @@ jobs:
         uses: dawidd6/action-download-artifact@v6
         with:
           workflow: dbt_cd.yml
-          branch: master
+          branch: main
           name: prod-manifest
           path: ./prod-manifest
         continue-on-error: true   # Graceful fallback on first run

@@ -72,7 +72,7 @@ jobs:
           cache: 'pip'
 
       - name: Install dbt-databricks
-        run: pip install dbt-databricks==1.9.3
+        run: pip install dbt-databricks==1.10.0
 
       - name: Write production profiles.yml
         run: |
@@ -115,9 +115,9 @@ jobs:
         run: |
           FULL_REFRESH="${{ github.event.inputs.full_refresh || 'false' }}"
           if [ "$FULL_REFRESH" = "true" ]; then
-            dbt run --profiles-dir . --full-refresh
+            dbt run --profiles-dir . --full-refresh --exclude tag:skip-ci
           else
-            dbt run --profiles-dir .
+            dbt run --profiles-dir .--exclude tag:skip-ci
           fi
 
       # ------------------------------------------------------------------

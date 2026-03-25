@@ -1,0 +1,146 @@
+# =============================================================================
+# WORKFLOW: dbt_scheduled.yml  —  Nightly / Scheduled Run
+# =============================================================================
+#
+# PURPOSE
+# -------
+# Runs dbt on a schedule (e.g. every night at 03:00 UTC) to keep production
+# data fresh even when there are no code changes. This is your "cron job" for
+# the warehouse.
+#
+# WHY A SEPARATE SCHEDULED WORKFLOW?
+# -----------------------------------
+# The CD workflow (dbt_cd.yml) only triggers on code changes. But data changes
+# constantly. Without a scheduled run:
+#   - Incremental models would only process new rows when code is deployed.
+#   - Source freshness would not be checked regularly.
+#   - dim_customers (a full table) would fall behind until someone pushes code.
+#
+# The scheduled workflow ensures production is always up-to-date with the
+# latest data, independent of code deployments.
+#
+# SCHEDULE
+# --------
+# Cron syntax: minute  hour  day-of-month  month  day-of-week
+#   '0 3 * * *'   → Every day at 03:00 UTC
+#   '0 */6 * * *' → Every 6 hours
+#   '0 3 * * 1-5' → Weekdays only at 03:00 UTC
+#
+# TIP: Use https://crontab.guru to build and validate cron expressions.
+#
+# REQUIRED GITHUB SECRETS
+# -----------------------
+#   DATABRICKS_HOST
+#   DATABRICKS_HTTP_PATH
+#   DATABRICKS_TOKEN
+#
+# =============================================================================
+
+name: dbt Scheduled Run
+
+on:
+  schedule:
+    # Every night at 03:00 UTC — adjust to match your data SLA
+    - cron: '0 3 * * *'
+
+  # Also allow a manual trigger from the GitHub UI
+  workflow_dispatch:
+    inputs:
+      full_refresh:
+        description: 'Force --full-refresh on incremental models?'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+jobs:
+  dbt-nightly:
+    name: Nightly dbt Run
+    runs-on: ubuntu-latest
+    environment: prod
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dbt-databricks
+        run: pip install dbt-databricks==1.9.3
+
+      - name: Write production profiles.yml
+        run: |
+          cat > profiles.yml << 'EOF'
+          raw:
+            target: prod
+            outputs:
+              prod:
+                type: databricks
+                host: ${{ secrets.DATABRICKS_HOST }}
+                http_path: ${{ secrets.DATABRICKS_HTTP_PATH }}
+                token: ${{ secrets.DATABRICKS_TOKEN }}
+                database: raw
+                schema: dbt_prod
+                threads: 16
+          EOF
+
+      - name: Install dbt packages
+        run: dbt deps --profiles-dir .
+
+      # ------------------------------------------------------------------
+      # SOURCE FRESHNESS
+      # ------------------------------------------------------------------
+      # Check raw source tables first. If sources are stale (breach the
+      # error_after threshold in _src_*.yml), fail fast before wasting
+      # compute running models on bad data.
+      - name: Check source freshness
+        run: dbt source freshness --profiles-dir .
+
+      # ------------------------------------------------------------------
+      # dbt run
+      # ------------------------------------------------------------------
+      # Incremental models will process only rows newer than their last run.
+      # Table/view models always fully refresh.
+      #
+      # The --full-refresh flag is OFF by default for the nightly run
+      # (incremental processing is the whole point of incremental models).
+      # Enable it via workflow_dispatch when you need to rebuild from scratch.
+      - name: dbt run
+        run: |
+          FULL_REFRESH="${{ github.event.inputs.full_refresh || 'false' }}"
+          if [ "$FULL_REFRESH" = "true" ]; then
+            dbt run --profiles-dir . --full-refresh
+          else
+            dbt run --profiles-dir .
+          fi
+
+      # ------------------------------------------------------------------
+      # dbt test
+      # ------------------------------------------------------------------
+      - name: dbt test
+        run: dbt test --profiles-dir . --store-failures
+
+      # ------------------------------------------------------------------
+      # dbt snapshot
+      # ------------------------------------------------------------------
+      # Capture SCD history snapshots nightly.
+      - name: dbt snapshot
+        run: dbt snapshot --profiles-dir .
+
+      # ------------------------------------------------------------------
+      # UPLOAD MANIFEST
+      # ------------------------------------------------------------------
+      # Keep the prod manifest up-to-date so CI always has a fresh baseline
+      # for Slim CI comparisons — even on nights with no code changes.
+      - name: Upload production manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: prod-manifest
+          path: target/manifest.json
+          retention-days: 90

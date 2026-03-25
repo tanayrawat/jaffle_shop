@@ -1,0 +1,37 @@
+# models/exposures.yml
+version: 2
+
+exposures:
+
+  - name: monthly_finance_dashboard
+    label: "Monthly Finance Dashboard"
+    type: dashboard
+    maturity: high
+    url: https://grafana.example.com/finance
+    description: >
+      Monthly revenue and order summary dashboard used by the
+      finance team. Reads from fct_orders for order totals and
+      dim_customers for customer lifetime value. Any changes to
+      amount, order_date, or customer_id columns will break
+      this dashboard. Coordinate with owner before schema changes.
+    depends_on:
+      - ref('fct_orders')
+      - ref('dim_customers')
+    owner:
+      name: Tanay Rawat
+      email: tanay.rawat14@gmail.com
+
+  - name: customer_analytics_notebook
+    label: "Customer Analytics Notebook"
+    type: notebook
+    maturity: medium
+    description: >
+      Jupyter notebook for exploratory customer segmentation analysis.
+      Reads customer_id, lifetime_value, number_of_orders from
+      dim_customers. Low-risk — notebook is updated frequently
+      and expects schema evolution.
+    depends_on:
+      - ref('dim_customers')
+    owner:
+      name: Tanay Rawat
+      email: tanay.rawat14@gmail.com

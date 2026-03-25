@@ -1,0 +1,23 @@
+# models/staging/stripe/_src_stripe.yml
+version: 2
+
+sources:
+  - name: stripe
+    database: raw
+    schema: stripe
+    tables:
+      - name: payment
+        columns:
+          - name: id
+            tests:
+              - unique
+              - not_null
+          - name: orderid
+            tests:
+              - not_null
+          - name: paymentmethod
+            tests:
+              - accepted_values:
+                  arguments:
+                    values: ['credit_card', 'coupon', 'bank_transfer', 'gift_card']
+

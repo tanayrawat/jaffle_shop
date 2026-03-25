@@ -1,0 +1,160 @@
+version: 2
+
+# ============================================================
+# INCREMENTAL STRATEGY QUICK-REFERENCE
+# ============================================================
+#
+# Strategy          | Adapter       | unique_key? | Handles updates? | Handles deletes? | Speed (relative)
+# ------------------|---------------|-------------|------------------|------------------|------------------
+# append            | All           | No          | No               | No               | ★★★★★ fastest
+# merge             | Delta/most    | Yes         | Yes              | No*              | ★★★
+# delete+insert     | Most          | Yes         | Yes              | Yes (by key)     | ★★★★
+# insert_overwrite  | Spark/Delta   | No          | Yes (partition)  | Yes (partition)  | ★★★★
+# replace_where     | Delta only    | No          | Yes (predicate)  | Yes (predicate)  | ★★★★
+# microbatch        | dbt 1.9+      | No          | Yes (batch)      | Yes (batch)      | ★★★★
+#
+# * merge can handle deletes with the `dbt_utils.merge_delete` pattern or
+#   by adding hard_deletes='new_record'/'ignore' config in dbt 1.9+.
+#
+# DECISION GUIDE
+# --------------
+# Q: Is the source strictly append-only with no corrections?
+#    → append
+#
+# Q: Do individual rows get updated (e.g. order status changes)?
+#    → merge (most universal, single atomic statement)
+#       OR delete+insert (simpler; better on adapters without MERGE support)
+#
+# Q: Is the table date-partitioned and can a full day be recomputed cheaply?
+#    → insert_overwrite
+#
+# Q: Is it Delta Lake and do you need flexible predicate-based replacement?
+#    → replace_where
+#
+# Q: Is the table huge (billions of rows) and do you want dbt to manage batches?
+#    → microbatch (dbt 1.9+)
+# ============================================================
+
+models:
+  - name: inc_append_strategy
+    description: |
+      Demonstrates the `append` incremental strategy.
+      On each run, only NEW rows (filtered by is_incremental()) are inserted.
+      No existing rows are touched. Fastest strategy; no deduplication.
+      Best for immutable event streams (clicks, logs, sensor data).
+    columns:
+      - name: order_id
+        description: Primary key of the order.
+      - name: customer_id
+        description: FK to the customer dimension.
+      - name: order_date
+        description: Date the order was placed. Used as the incremental filter column.
+      - name: status
+        description: Current order status.
+      - name: amount
+        description: Total successful payment amount for the order.
+
+  - name: inc_merge_strategy
+    description: |
+      Demonstrates the `merge` incremental strategy (UPSERT).
+      Uses Delta Lake MERGE INTO to match on `order_id`: existing rows are
+      UPDATED and new rows are INSERTED in a single atomic operation.
+      `merge_update_columns` restricts which columns can be overwritten.
+      Best for fact tables where rows change status over time.
+    columns:
+      - name: order_id
+        description: Primary key; used as the unique_key for merge matching.
+      - name: customer_id
+        description: FK to the customer dimension.
+      - name: order_date
+        description: Date the order was placed.
+      - name: status
+        description: Current order status — updated on each merge run.
+      - name: amount
+        description: Total successful payment amount — updated on each merge run.
+      - name: updated_at
+        description: Timestamp of when the row was last merged.
+
+  - name: inc_delete_insert_strategy
+    description: |
+      Demonstrates the `delete+insert` incremental strategy.
+      dbt stages the incoming rows, then runs two steps inside a transaction:
+        1. DELETE FROM target WHERE unique_key IN (staged keys)
+        2. INSERT INTO target SELECT * FROM staged rows
+      Effectively replaces matching rows by key, then inserts new ones.
+      Unlike merge, this is two separate DML statements rather than one MERGE INTO.
+      Useful on adapters that lack MERGE support, or when a bulk delete+reinsert
+      is faster than MERGE on large tables.
+    columns:
+      - name: order_id
+        description: Primary key; used as the unique_key to identify rows to delete.
+      - name: customer_id
+        description: FK to the customer dimension.
+      - name: order_date
+        description: Date the order was placed. Used as the incremental filter column.
+      - name: status
+        description: Current order status.
+      - name: amount
+        description: Total successful payment amount for the order.
+
+  - name: inc_insert_overwrite_strategy
+    description: |
+      Demonstrates the `insert_overwrite` incremental strategy.
+      Replaces entire partitions (defined by `partition_by=['order_date']`)
+      atomically. The query must return ALL rows for each partition it touches —
+      missing rows in a partition will be deleted.
+      Best for date-partitioned aggregation tables recomputed daily.
+    columns:
+      - name: order_id
+        description: Primary key of the order.
+      - name: customer_id
+        description: FK to the customer dimension.
+      - name: order_date
+        description: Partition column — rows are grouped and replaced by this date.
+      - name: status
+        description: Current order status.
+      - name: amount
+        description: Total successful payment amount for the order.
+
+  - name: inc_replace_where_strategy
+    description: |
+      Demonstrates the `replace_where` incremental strategy (Delta Lake only).
+      Uses Delta's replaceWhere to atomically delete rows matching
+      `incremental_predicates`, then insert the query result.
+      More flexible than insert_overwrite because the predicate is arbitrary
+      (not tied to partition boundaries).
+      WARNING: the WHERE clause in this model MUST match `incremental_predicates`
+      exactly — a mismatch causes data loss.
+      Best for rolling-window reprocessing on Delta Lake tables.
+    columns:
+      - name: order_id
+        description: Primary key of the order.
+      - name: customer_id
+        description: FK to the customer dimension.
+      - name: order_date
+        description: Date column used in the replace_where predicate.
+      - name: status
+        description: Current order status.
+      - name: amount
+        description: Total successful payment amount for the order.
+
+  - name: inc_microbatch_strategy
+    description: |
+      Demonstrates the `microbatch` incremental strategy (dbt 1.9+).
+      dbt automatically manages batch windows based on `event_time` and
+      `batch_size`. No is_incremental() filter is needed — dbt injects the
+      batch window filter automatically.
+      `lookback=3` means dbt always reprocesses the last 3 completed day-batches,
+      handling late-arriving data without manual intervention.
+      Best for very large event tables requiring managed, retriable batches.
+    columns:
+      - name: order_id
+        description: Primary key of the order.
+      - name: customer_id
+        description: FK to the customer dimension.
+      - name: order_date
+        description: event_time column — dbt uses this to determine batch windows.
+      - name: status
+        description: Current order status.
+      - name: amount
+        description: Total successful payment amount for the order.

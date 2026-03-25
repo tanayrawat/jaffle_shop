@@ -1,0 +1,48 @@
+{{
+    config(
+        materialized='incremental',
+        unique_key='order_id',
+        incremental_strategy='merge'
+    )
+}}
+
+with orders as (
+    select * from {{ ref('stg_jaffle_shop__orders') }}
+),
+
+payments as (
+    select * from {{ ref('stg_stripe__payments') }}
+),
+
+order_payments as (
+    select
+        order_id,
+        sum(case when status = 'success' then amount end) as amount
+    from payments
+    group by 1
+),
+
+-- ✅ Isolate the max lookup into its own CTE
+incremental_filter as (
+    {% if is_incremental() %}
+        select dateadd(DAY, -3, max(order_date)) as min_order_date
+        from {{ this }}
+    {% else %}
+        select cast('1900-01-01' as date) as min_order_date
+    {% endif %}
+),
+
+final as (
+    select
+        orders.order_id,
+        orders.customer_id,
+        orders.order_date,
+        coalesce(order_payments.amount, 0) as amount
+    from orders
+    left join order_payments using (order_id)
+    -- ✅ Join against the CTE instead of inline subquery
+    join incremental_filter
+        on orders.order_date > incremental_filter.min_order_date
+)
+
+select * from final

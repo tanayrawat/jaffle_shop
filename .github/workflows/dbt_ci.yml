@@ -1,0 +1,216 @@
+# =============================================================================
+# WORKFLOW: dbt_ci.yml  —  Pull Request (Slim CI)
+# =============================================================================
+#
+# PURPOSE
+# -------
+# Runs on every pull request targeting `master`. It validates ONLY the models
+# that changed in the PR and their downstream dependents, rather than the entire
+# project. This is called "Slim CI".
+#
+# WHY SLIM CI?
+# ------------
+# A full `dbt run` on every PR would rebuild hundreds of models and waste time/
+# compute. Slim CI uses two dbt flags together:
+#
+#   --select state:modified+
+#       "+modified" means: the changed nodes PLUS all downstream nodes that
+#       depend on them. This catches regressions in child models.
+#
+#   --defer --state ./prod-manifest
+#       "--defer" tells dbt: for any node NOT in the selected set that is
+#       referenced as an upstream dependency, use the already-built version
+#       from production instead of rebuilding it.
+#       "--state ./prod-manifest" points dbt to the production manifest.json
+#       so it knows what "already built in prod" looks like.
+#
+# Together they mean:
+#   "Run only what changed + their children; for everything else, borrow from prod."
+#
+# REQUIRED GITHUB SECRETS (Settings → Secrets and variables → Actions)
+# ---------------------------------------------------------------------
+#   DATABRICKS_HOST        e.g. dbc-aa8ddb8b-c135.cloud.databricks.com
+#   DATABRICKS_HTTP_PATH   e.g. /sql/1.0/warehouses/a84d06dd5092e3b1
+#   DATABRICKS_TOKEN       A Databricks Personal Access Token (PAT) for CI
+#                          Create one under: User Settings → Developer → Access Tokens
+#
+# HOW THE MANIFEST IS FETCHED
+# ---------------------------
+# The production manifest.json (produced by the CD workflow on each merge to
+# master) is stored as a GitHub Actions artifact named "prod-manifest".
+# We download the most recent one here to use as the --state baseline.
+# On the very first run (no artifact exists yet) we skip the slim CI flags
+# and run the full project instead.
+#
+# =============================================================================
+
+name: dbt CI — Pull Request
+
+on:
+  pull_request:
+    branches:
+      - master
+    # Only trigger when SQL or YAML model/config files change.
+    # Skip-triggering on docs-only or unrelated changes saves CI minutes.
+    paths:
+      - 'models/**'
+      - 'tests/**'
+      - 'macros/**'
+      - 'snapshots/**'
+      - 'seeds/**'
+      - 'dbt_project.yml'
+      - 'packages.yml'
+
+# Cancel any in-progress CI run for the same PR when a new commit is pushed.
+# Prevents queue pile-up when you push multiple times quickly.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dbt-slim-ci:
+    name: Slim CI — run modified models + downstream
+    runs-on: ubuntu-latest
+    environment: dev          # GitHub Environment (optional but recommended for secrets scoping)
+
+    steps:
+      # ------------------------------------------------------------------
+      # 1. CHECKOUT
+      # ------------------------------------------------------------------
+      # Standard checkout. fetch-depth: 0 gives full git history so that
+      # dbt's --state comparison can detect which files truly changed.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ------------------------------------------------------------------
+      # 2. PYTHON SETUP
+      # ------------------------------------------------------------------
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          # Cache pip installs between runs to speed up the workflow.
+          cache: 'pip'
+
+      # ------------------------------------------------------------------
+      # 3. INSTALL dbt-databricks
+      # ------------------------------------------------------------------
+      # dbt-databricks includes dbt-core as a dependency.
+      # Pin to a specific version for reproducibility. Update intentionally.
+      - name: Install dbt-databricks
+        run: pip install dbt-databricks==1.9.3
+
+      # ------------------------------------------------------------------
+      # 4. WRITE profiles.yml
+      # ------------------------------------------------------------------
+      # In CI there is no ~/.dbt/profiles.yml with OAuth. Instead we write
+      # one dynamically from GitHub Secrets, using a PAT (token) for auth.
+      #
+      # We write to the project root so dbt picks it up via --profiles-dir .
+      # Never commit an actual profiles.yml with credentials to git.
+      - name: Write CI profiles.yml
+        run: |
+          cat > profiles.yml << 'EOF'
+          raw:
+            target: dev
+            outputs:
+              dev:
+                type: databricks
+                host: ${{ secrets.DATABRICKS_HOST }}
+                http_path: ${{ secrets.DATABRICKS_HTTP_PATH }}
+                token: ${{ secrets.DATABRICKS_TOKEN }}
+                database: raw
+                # CI uses a PR-specific schema so it never touches dev or prod data.
+                # e.g. PR #42 writes to dbt_pr_42 — fully isolated.
+                schema: dbt_pr_${{ github.event.pull_request.number }}
+                threads: 4
+          EOF
+
+      # ------------------------------------------------------------------
+      # 5. dbt deps
+      # ------------------------------------------------------------------
+      # Installs packages listed in packages.yml (dbt_utils etc.).
+      # The dbt_packages/ directory is .gitignored, so it must be installed
+      # fresh on every CI run.
+      - name: Install dbt packages
+        run: dbt deps --profiles-dir .
+
+      # ------------------------------------------------------------------
+      # 6. DOWNLOAD PRODUCTION MANIFEST (for Slim CI state comparison)
+      # ------------------------------------------------------------------
+      # The CD workflow uploads manifest.json as an artifact after each
+      # successful prod run. We download that artifact here.
+      #
+      # If no artifact exists yet (first ever run), the step will fail but
+      # we mark it continue-on-error: true so the workflow keeps going —
+      # the next step handles the fallback gracefully.
+      - name: Download production manifest
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: dbt_cd.yml
+          branch: master
+          name: prod-manifest
+          path: ./prod-manifest
+        continue-on-error: true   # Graceful fallback on first run
+
+      # ------------------------------------------------------------------
+      # 7. dbt compile — syntax check
+      # ------------------------------------------------------------------
+      # Compiles all SQL (resolves ref(), source(), macros) without running
+      # anything against the warehouse. Fast, cheap, catches Jinja/SQL syntax
+      # errors and broken ref() chains immediately.
+      - name: dbt compile
+        run: dbt compile --profiles-dir .
+
+      # ------------------------------------------------------------------
+      # 8. dbt run — Slim CI
+      # ------------------------------------------------------------------
+      # If the prod manifest was downloaded, run only modified models + their
+      # downstream dependents, deferring everything else to prod.
+      # If no manifest (first run), run the whole project.
+      - name: dbt run (slim CI)
+        run: |
+          if [ -f ./prod-manifest/manifest.json ]; then
+            echo "Prod manifest found — running slim CI"
+            dbt run \
+              --profiles-dir . \
+              --select state:modified+ \
+              --defer \
+              --state ./prod-manifest
+          else
+            echo "No prod manifest — running full project (first run)"
+            dbt run --profiles-dir .
+          fi
+
+      # ------------------------------------------------------------------
+      # 9. dbt test — Slim CI
+      # ------------------------------------------------------------------
+      # Same logic: test only the nodes that were just built.
+      # Tests include schema tests (unique, not_null, etc.) and custom
+      # data tests in the tests/ directory.
+      - name: dbt test (slim CI)
+        run: |
+          if [ -f ./prod-manifest/manifest.json ]; then
+            dbt test \
+              --profiles-dir . \
+              --select state:modified+ \
+              --defer \
+              --state ./prod-manifest
+          else
+            dbt test --profiles-dir .
+          fi
+
+      # ------------------------------------------------------------------
+      # 10. CLEANUP — drop PR schema
+      # ------------------------------------------------------------------
+      # Drops the temporary PR schema from Databricks so it doesn't
+      # accumulate stale tables. Runs even if previous steps failed.
+      - name: Drop PR schema
+        if: always()
+        run: |
+          dbt run-operation drop_schema \
+            --args "{'schema_name': 'dbt_pr_${{ github.event.pull_request.number }}'}" \
+            --profiles-dir . \
+          || true    # Don't fail the workflow if drop fails

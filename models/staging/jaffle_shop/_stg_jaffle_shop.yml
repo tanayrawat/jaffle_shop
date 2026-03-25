@@ -1,0 +1,30 @@
+models:
+  - name: stg_jaffle_shop__customers
+    description: "Staging model for customers table in jaffle_shop source"
+    columns:
+      - name: customer_id
+        description: "Unique identifier for each customer"
+        tests:
+          - unique
+          - not_null
+  - name: stg_jaffle_shop__orders
+    description: "Staging model for orders table in jaffle_shop source"
+    columns:
+      - name: order_id
+        description: "Unique identifier for each order"
+        tests:
+          - unique
+          - not_null
+      - name: status
+        description: "Status of the order"
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['completed', 'shipped', 'placed', 'returned', 'return_pending']
+      - name: customer_id
+        description: "Foreign key to customers table"
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('stg_jaffle_shop__customers')
+                field: customer_id

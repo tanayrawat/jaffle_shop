@@ -1,0 +1,225 @@
+# =============================================================================
+# WORKFLOW: dbt_cd.yml  —  Production Deployment (Continuous Delivery)
+# =============================================================================
+#
+# PURPOSE
+# -------
+# Runs when a PR is merged to `master`. Deploys all models to production
+# (dbt_prod schema on Databricks), runs all tests, checks source freshness,
+# and generates docs. Uploads the resulting manifest.json so the CI workflow
+# can use it for Slim CI state comparisons.
+#
+# WHAT IS manifest.json?
+# ----------------------
+# After every `dbt run` or `dbt compile`, dbt writes target/manifest.json.
+# It contains a complete snapshot of every node (model, test, source, macro)
+# in the project: their compiled SQL, config, dependencies, and a content hash.
+# The CI workflow downloads this artifact and passes it to --state so dbt can
+# compare the current PR's code against what was last deployed to production.
+#
+# ENVIRONMENT PROTECTION (recommended)
+# -------------------------------------
+# Create a GitHub Environment named "prod" under:
+#   Settings → Environments → New environment
+# Add a "Required reviewers" rule so that manual approval is needed before any
+# production deployment runs. This is your last line of defense.
+#
+# REQUIRED GITHUB SECRETS
+# -----------------------
+# Same three as CI, but pointed at a PRODUCTION service account:
+#   DATABRICKS_HOST
+#   DATABRICKS_HTTP_PATH
+#   DATABRICKS_TOKEN    ← Use a separate prod service-account PAT, not your personal one
+#
+# =============================================================================
+
+name: dbt CD — Production Deploy
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'models/**'
+      - 'tests/**'
+      - 'macros/**'
+      - 'snapshots/**'
+      - 'seeds/**'
+      - 'dbt_project.yml'
+      - 'packages.yml'
+
+  # Allow manual trigger from the GitHub UI (Actions → dbt CD → Run workflow).
+  # Useful for emergency re-runs or forced full-refreshes.
+  workflow_dispatch:
+    inputs:
+      full_refresh:
+        description: 'Run with --full-refresh? (rebuilds all incremental tables from scratch)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+jobs:
+  dbt-prod-deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    environment: prod           # Requires manual approval if configured
+
+    steps:
+      # ------------------------------------------------------------------
+      # 1. CHECKOUT
+      # ------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # 2. PYTHON + dbt SETUP
+      # ------------------------------------------------------------------
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dbt-databricks
+        run: pip install dbt-databricks==1.9.3
+
+      # ------------------------------------------------------------------
+      # 3. WRITE PRODUCTION profiles.yml
+      # ------------------------------------------------------------------
+      # Note: target is `prod` here, which maps to dbt_prod schema.
+      - name: Write production profiles.yml
+        run: |
+          cat > profiles.yml << 'EOF'
+          raw:
+            target: prod
+            outputs:
+              prod:
+                type: databricks
+                host: ${{ secrets.DATABRICKS_HOST }}
+                http_path: ${{ secrets.DATABRICKS_HTTP_PATH }}
+                token: ${{ secrets.DATABRICKS_TOKEN }}
+                database: raw
+                schema: dbt_prod
+                threads: 16
+          EOF
+
+      # ------------------------------------------------------------------
+      # 4. dbt deps
+      # ------------------------------------------------------------------
+      - name: Install dbt packages
+        run: dbt deps --profiles-dir .
+
+      # ------------------------------------------------------------------
+      # 5. dbt source freshness
+      # ------------------------------------------------------------------
+      # Checks that raw source tables have been updated recently.
+      # Configured in _src_*.yml files with warn_after / error_after thresholds.
+      # If a source is stale, this step fails and blocks the deploy — you
+      # don't want to build prod models on top of stale data.
+      #
+      # The freshness results are saved to target/sources.json for the docs step.
+      - name: Check source freshness
+        run: dbt source freshness --profiles-dir . --output target/sources.json
+
+      # ------------------------------------------------------------------
+      # 6. dbt run — Full Production Deploy
+      # ------------------------------------------------------------------
+      # Runs all models against the prod target.
+      #
+      # --full-refresh flag:
+      #   Normally omitted — incremental models only process new rows.
+      #   With --full-refresh: drops and recreates every incremental table
+      #   from scratch. Use this when schema changes require a full rebuild,
+      #   or when triggered manually via workflow_dispatch with full_refresh=true.
+      #
+      # Why no --select here?
+      #   CD always runs everything to ensure production is fully consistent.
+      #   Slim CI (the PR workflow) is where we limit scope to save time.
+      - name: dbt run
+        run: |
+          FULL_REFRESH="${{ github.event.inputs.full_refresh || 'false' }}"
+          if [ "$FULL_REFRESH" = "true" ]; then
+            echo "Running with --full-refresh"
+            dbt run --profiles-dir . --full-refresh
+          else
+            dbt run --profiles-dir .
+          fi
+
+      # ------------------------------------------------------------------
+      # 7. dbt test — Full Test Suite
+      # ------------------------------------------------------------------
+      # Runs all schema tests and custom data tests on production data.
+      # If tests fail, the workflow fails — but models are already built.
+      # Consider whether you want to block on test failures or just alert.
+      #
+      # --store-failures: saves failing rows to the dbt_prod schema as tables
+      # (e.g. dbt_prod.not_null_fct_orders_order_id) so you can query them.
+      - name: dbt test
+        run: dbt test --profiles-dir . --store-failures
+
+      # ------------------------------------------------------------------
+      # 8. dbt snapshot
+      # ------------------------------------------------------------------
+      # Runs SCD (Slowly Changing Dimension) snapshots, e.g.
+      # scd_jaffle_shop__customers. Snapshots track row-level history over time.
+      # Must run AFTER dbt run so snapshots see the latest staging data.
+      - name: dbt snapshot
+        run: dbt snapshot --profiles-dir .
+
+      # ------------------------------------------------------------------
+      # 9. dbt docs generate
+      # ------------------------------------------------------------------
+      # Generates the dbt docs site (target/index.html + catalog.json).
+      # The catalog.json is produced by querying the warehouse for column-level
+      # metadata (types, row counts, etc.) and merging it with manifest.json.
+      #
+      # The generated docs are uploaded as an artifact so you can download and
+      # browse them, or deploy to GitHub Pages / S3 / Netlify.
+      - name: Generate dbt docs
+        run: dbt docs generate --profiles-dir .
+        continue-on-error: true   # Docs failure shouldn't block a successful deploy
+
+      # ------------------------------------------------------------------
+      # 10. UPLOAD manifest.json (CRITICAL for Slim CI)
+      # ------------------------------------------------------------------
+      # This is the artifact that the CI workflow downloads for --state.
+      # It represents the current state of production.
+      # Retention: 90 days is enough — PRs are usually short-lived.
+      - name: Upload production manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: prod-manifest
+          path: target/manifest.json
+          retention-days: 90
+
+      # ------------------------------------------------------------------
+      # 11. UPLOAD dbt docs
+      # ------------------------------------------------------------------
+      - name: Upload dbt docs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dbt-docs
+          path: |
+            target/index.html
+            target/catalog.json
+            target/manifest.json
+          retention-days: 30
+
+      # ------------------------------------------------------------------
+      # 12. NOTIFY ON FAILURE (optional — add your Slack webhook secret)
+      # ------------------------------------------------------------------
+      # Uncomment and add SLACK_WEBHOOK_URL secret to enable Slack alerts.
+      # - name: Notify Slack on failure
+      #   if: failure()
+      #   uses: slackapi/slack-github-action@v1
+      #   with:
+      #     payload: |
+      #       {
+      #         "text": ":x: dbt prod deploy FAILED on `${{ github.sha }}`\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      #       }
+      #   env:
+      #     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

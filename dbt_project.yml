@@ -47,3 +47,6 @@ on-run-start:
 
 on-run-end:
   - "{{ log('dbt run completed. Models run: ' ~ results | length, info=true) }}"
+
+flags:
+  use_replace_on_for_insert_overwrite: true

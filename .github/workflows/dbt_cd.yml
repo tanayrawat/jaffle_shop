@@ -83,7 +83,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dbt-databricks
-        run: pip install dbt-databricks==1.9.3
+        run: pip install dbt-databricks==1.10.0
 
       # ------------------------------------------------------------------
       # 3. WRITE PRODUCTION profiles.yml
@@ -121,7 +121,7 @@ jobs:
       #
       # The freshness results are saved to target/sources.json for the docs step.
       - name: Check source freshness
-        run: dbt source freshness --profiles-dir . --output target/sources.json
+        run: dbt source freshness --profiles-dir . --output-path target/sources.json
 
       # ------------------------------------------------------------------
       # 6. dbt run — Full Production Deploy

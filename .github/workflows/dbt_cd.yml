@@ -38,7 +38,7 @@ name: dbt CD — Production Deploy
 on:
   push:
     branches:
-      - master
+      - main
     paths:
       - 'models/**'
       - 'tests/**'

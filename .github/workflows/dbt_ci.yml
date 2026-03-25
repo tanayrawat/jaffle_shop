@@ -99,7 +99,7 @@ jobs:
       # dbt-databricks includes dbt-core as a dependency.
       # Pin to a specific version for reproducibility. Update intentionally.
       - name: Install dbt-databricks
-        run: pip install dbt-databricks==1.9.3
+        run: pip install dbt-databricks==latest
 
       # ------------------------------------------------------------------
       # 4. WRITE profiles.yml

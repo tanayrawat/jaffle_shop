@@ -1,3 +1,5 @@
+-- models/staging/jaffle_shop/stg_jaffle_shop__orders.sql
+-- test CI pipeline
 select
     id as order_id,
     user_id as customer_id,

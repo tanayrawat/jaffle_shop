@@ -142,9 +142,9 @@ jobs:
           FULL_REFRESH="${{ github.event.inputs.full_refresh || 'false' }}"
           if [ "$FULL_REFRESH" = "true" ]; then
             echo "Running with --full-refresh"
-            dbt run --profiles-dir . --full-refresh --select tag:skip-ci
+            dbt run --profiles-dir . --full-refresh --exclude tag:skip-ci
           else
-            dbt run --profiles-dir . --select tag:skip-ci
+            dbt run --profiles-dir . --exclude tag:skip-ci
           fi
 
       # ------------------------------------------------------------------

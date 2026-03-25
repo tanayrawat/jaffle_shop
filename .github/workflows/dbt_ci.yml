@@ -175,12 +175,13 @@ jobs:
             echo "Prod manifest found — running slim CI"
             dbt run \
               --profiles-dir . \
+              --exclude tag:skip-ci \
               --select state:modified+ \
               --defer \
               --state ./prod-manifest
           else
             echo "No prod manifest — running full project (first run)"
-            dbt run --profiles-dir .
+            dbt run --profiles-dir . --exclude tag:skip-ci
           fi
 
       # ------------------------------------------------------------------

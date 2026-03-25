@@ -49,7 +49,7 @@ name: dbt CI — Pull Request
 on:
   pull_request:
     branches:
-      - master
+      - main
     # Only trigger when SQL or YAML model/config files change.
     # Skip-triggering on docs-only or unrelated changes saves CI minutes.
     paths:

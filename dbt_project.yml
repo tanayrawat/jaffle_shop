@@ -22,7 +22,7 @@ snapshot-paths: ["snapshots"]
 target-path: "target"  # directory which will store compiled SQL files
 clean-targets:         # directories to be removed by `dbt clean`
     - "target"
-    - "dbt_modules"
+    - "dbt_packages"
 
 
 # Configuring models
@@ -47,3 +47,6 @@ on-run-start:
 
 on-run-end:
   - "{{ log('dbt run completed. Models run: ' ~ results | length, info=true) }}"
+
+flags:
+  use_replace_on_for_insert_overwrite: true

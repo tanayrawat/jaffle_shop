@@ -1,6 +1,7 @@
 {{
     config(
         materialized='incremental',
+        file_format='delta',
         incremental_strategy='delete+insert',
         unique_key='order_id'
     )

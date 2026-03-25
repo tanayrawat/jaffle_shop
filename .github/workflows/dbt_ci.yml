@@ -92,7 +92,6 @@ jobs:
         with:
           python-version: '3.11'
           # Cache pip installs between runs to speed up the workflow.
-          cache: 'pip'
 
       # ------------------------------------------------------------------
       # 3. INSTALL dbt-databricks
@@ -100,7 +99,7 @@ jobs:
       # dbt-databricks includes dbt-core as a dependency.
       # Pin to a specific version for reproducibility. Update intentionally.
       - name: Install dbt-databricks
-        run: pip install dbt-databricks==1.9.3
+        run: pip install dbt-databricks==1.10.0
 
       # ------------------------------------------------------------------
       # 4. WRITE profiles.yml
@@ -150,7 +149,7 @@ jobs:
         uses: dawidd6/action-download-artifact@v6
         with:
           workflow: dbt_cd.yml
-          branch: master
+          branch: main
           name: prod-manifest
           path: ./prod-manifest
         continue-on-error: true   # Graceful fallback on first run
@@ -176,12 +175,13 @@ jobs:
             echo "Prod manifest found — running slim CI"
             dbt run \
               --profiles-dir . \
+              --exclude tag:skip-ci \
               --select state:modified+ \
               --defer \
               --state ./prod-manifest
           else
             echo "No prod manifest — running full project (first run)"
-            dbt run --profiles-dir .
+            dbt run --profiles-dir . --exclude tag:skip-ci
           fi
 
       # ------------------------------------------------------------------

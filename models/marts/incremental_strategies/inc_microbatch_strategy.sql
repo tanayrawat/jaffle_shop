@@ -3,7 +3,7 @@
         materialized='incremental',
         incremental_strategy='microbatch',
         event_time='order_date',
-        begin='2020-01-01',
+        begin='2026-03-22',
         batch_size='day',
         lookback=3
     )

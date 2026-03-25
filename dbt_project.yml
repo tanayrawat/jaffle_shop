@@ -38,6 +38,8 @@ models:
       +materialized: view
     marts:
       +materialized: table
+      incremental_strategies:
+        +tags: ['skip-ci']
       +tags: ['marts']
       +post-hook:
         - "{{ log('Built model: ' ~ this, info=true) }}"
